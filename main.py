@@ -1,122 +1,105 @@
 #!/usr/bin/env python3
-"""The Koi in the Teacup -- make.fun bounty ai-excited-01.
+"""Draw one exciting image: a colossal blue whale breaching out of a
+stormy sea at sunset, silhouetted against a huge low sun, a tiny sailboat
+below for scale. Pure standard library, deterministic (fixed seed).
 
-A giant white-and-orange koi leaps in a graceful S-curve out of a tiny
-teacup on a wooden table at dusk, arcing toward a low golden sun.
-Water splashes, sakura petals drift, warm dusk sky.
-
-Python 3 standard library only. Writes one deterministic PNG to
-$MAKEFUN_OUTPUT_DIR/entry.png (or ./output/entry.png).
+Writes a 1024x1024 PNG to $MAKEFUN_OUTPUT_DIR/entry.png (or /output).
 """
 import math
 import os
+import random
 import struct
 import zlib
 
-W = 1024
-H = 1024
+W = H = 1024
+SEED = 20261116
 
-# ---------------------------------------------------------------- raster
+rng = random.Random(SEED)
+
+# ---------------------------------------------------------------- canvas
 buf = bytearray(W * H * 3)
 
 
-def px(x, y, r, g, b):
+def put(x, y, c):
     if 0 <= x < W and 0 <= y < H:
         i = (y * W + x) * 3
-        buf[i] = r
-        buf[i + 1] = g
-        buf[i + 2] = b
+        buf[i], buf[i + 1], buf[i + 2] = c
 
 
-def blend(x, y, r, g, b, a):
-    """Blend colour over existing pixel, a in 0..1."""
-    if 0 <= x < W and 0 <= y < H:
+def blend(x, y, c, a):
+    if 0 <= x < W and 0 <= y < H and a > 0:
         i = (y * W + x) * 3
-        buf[i] = int(buf[i] * (1 - a) + r * a)
-        buf[i + 1] = int(buf[i + 1] * (1 - a) + g * a)
-        buf[i + 2] = int(buf[i + 2] * (1 - a) + b * a)
+        if a >= 1.0:
+            buf[i], buf[i + 1], buf[i + 2] = c
+        else:
+            buf[i] = int(round(buf[i] * (1 - a) + c[0] * a))
+            buf[i + 1] = int(round(buf[i + 1] * (1 - a) + c[1] * a))
+            buf[i + 2] = int(round(buf[i + 2] * (1 - a) + c[2] * a))
 
 
-def disc(cx, cy, rad, r, g, b, a=1.0):
-    rad = int(rad)
-    if rad <= 0:
+def row_fill(y, c):
+    if 0 <= y < H:
+        i = y * W * 3
+        buf[i:i + W * 3] = bytes(c) * W
+
+
+def span(y, x0, x1, c, a=1.0):
+    if y < 0 or y >= H:
         return
-    for y in range(cy - rad, cy + rad + 1):
-        dy = y - cy
-        dx = int(math.sqrt(max(0, rad * rad - dy * dy)))
-        for x in range(cx - dx, cx + dx + 1):
-            if a >= 1.0:
-                px(x, y, r, g, b)
-            else:
-                blend(x, y, r, g, b, a)
-
-
-def ellipse(cx, cy, rx, ry, r, g, b, a=1.0):
-    rx = int(rx)
-    ry = int(ry)
-    if rx <= 0 or ry <= 0:
+    x0 = max(0, int(x0))
+    x1 = min(W - 1, int(x1))
+    if x1 < x0:
         return
-    for y in range(cy - ry, cy + ry + 1):
-        dy = (y - cy) / ry
-        rem = 1.0 - dy * dy
-        if rem < 0:
-            continue
-        dx = int(rx * math.sqrt(rem))
-        for x in range(cx - dx, cx + dx + 1):
-            if a >= 1.0:
-                px(x, y, r, g, b)
-            else:
-                blend(x, y, r, g, b, a)
+    if a >= 1.0:
+        i = (y * W + x0) * 3
+        buf[i:(y * W + x1 + 1) * 3] = bytes(c) * (x1 - x0 + 1)
+    else:
+        for x in range(x0, x1 + 1):
+            blend(x, y, c, a)
 
 
-def rot_ellipse(cx, cy, rx, ry, ang_deg, r, g, b, a=1.0):
-    """Filled ellipse rotated by ang_deg, drawn by sampling its disc."""
-    ang = math.radians(ang_deg)
-    ca, sa = math.cos(ang), math.sin(ang)
-    R = int(max(rx, ry)) + 1
-    for y in range(cy - R, cy + R + 1):
-        for x in range(cx - R, cx + R + 1):
-            dx, dy = x - cx, y - cy
-            u = dx * ca + dy * sa
-            v = -dx * sa + dy * ca
-            if (u / rx) ** 2 + (v / ry) ** 2 <= 1.0:
-                if a >= 1.0:
-                    px(x, y, r, g, b)
-                else:
-                    blend(x, y, r, g, b, a)
-
-
-def poly(points, r, g, b, a=1.0):
-    """Scanline fill of a simple polygon."""
-    if not points:
+def circle(cx, cy, r, c, a=1.0):
+    cx, cy = int(cx), int(cy)
+    r = int(r)
+    if r <= 0:
         return
+    for dy in range(-r, r + 1):
+        dx = int(math.sqrt(r * r - dy * dy))
+        span(cy + dy, cx - dx, cx + dx, c, a)
+
+
+def ellipse(cx, cy, rx, ry, c, a=1.0):
+    cx, cy = int(cx), int(cy)
+    rx, ry = int(rx), int(ry)
+    for dy in range(-int(ry), int(ry) + 1):
+        t = dy / ry
+        dx = int(rx * math.sqrt(max(0.0, 1 - t * t)))
+        span(cy + dy, cx - dx, cx + dx, c, a)
+
+
+def poly(points, c, a=1.0):
+    # Scanline fill of a simple polygon.
     ys = [p[1] for p in points]
-    ymin, ymax = max(0, int(min(ys))), min(H - 1, int(max(ys)))
+    y0, y1 = int(min(ys)), int(max(ys))
     n = len(points)
-    for y in range(ymin, ymax + 1):
+    for y in range(y0, y1 + 1):
         xs = []
-        for i in range(n):
-            x1, y1 = points[i]
-            x2, y2 = points[(i + 1) % n]
-            if (y1 <= y < y2) or (y2 <= y < y1):
-                t = (y - y1) / (y2 - y1)
-                xs.append(x1 + t * (x2 - x1))
+        for k in range(n):
+            x0, y0p = points[k]
+            x1, y1p = points[(k + 1) % n]
+            if (y0p <= y < y1p) or (y1p <= y < y0p):
+                t = (y - y0p) / (y1p - y0p)
+                xs.append(x0 + t * (x1 - x0))
         xs.sort()
         for k in range(0, len(xs) - 1, 2):
-            for x in range(int(math.ceil(xs[k])), int(xs[k + 1]) + 1):
-                if a >= 1.0:
-                    px(x, y, r, g, b)
-                else:
-                    blend(x, y, r, g, b, a)
+            span(y, xs[k], xs[k + 1], c, a)
 
 
-def line(x1, y1, x2, y2, r, g, b, width=1, a=1.0):
-    steps = int(max(abs(x2 - x1), abs(y2 - y1))) + 1
-    for i in range(steps + 1):
-        t = i / max(1, steps)
-        x = int(x1 + (x2 - x1) * t)
-        y = int(y1 + (y2 - y1) * t)
-        disc(x, y, max(1, width // 2), r, g, b, a)
+def thick_line(x0, y0, x1, y1, w, c, a=1.0):
+    steps = int(max(abs(x1 - x0), abs(y1 - y0), 1)) + 1
+    for k in range(steps + 1):
+        t = k / steps
+        circle(int(x0 + (x1 - x0) * t), int(y0 + (y1 - y0) * t), w / 2, c, a)
 
 
 def lerp(a, b, t):
@@ -124,296 +107,248 @@ def lerp(a, b, t):
 
 
 def lerp3(c1, c2, t):
-    return (int(lerp(c1[0], c2[0], t)), int(lerp(c1[1], c2[1], t)),
-            int(lerp(c1[2], c2[2], t)))
+    return tuple(int(round(lerp(a, b, t))) for a, b in zip(c1, c2))
+
+
+def bez(p0, p1, p2, t):
+    u = 1 - t
+    return (u * u * p0[0] + 2 * u * t * p1[0] + t * t * p2[0],
+            u * u * p0[1] + 2 * u * t * p1[1] + t * t * p2[1])
 
 
 # ---------------------------------------------------------------- sky
 SKY_STOPS = [
-    (0.00, (24, 20, 66)),    # deep indigo, top
-    (0.35, (74, 44, 108)),   # violet dusk
-    (0.60, (168, 74, 88)),   # rose
-    (0.80, (248, 128, 62)),  # warm orange near horizon
-    (1.00, (255, 176, 84)),
+    (0.00, (16, 8, 46)),
+    (0.30, (52, 22, 74)),
+    (0.55, (124, 42, 92)),
+    (0.75, (214, 74, 76)),
+    (1.00, (255, 128, 58)),
 ]
-HORIZON = 818
-
-
-def sky_at(y):
-    t = y / HORIZON
-    for i in range(len(SKY_STOPS) - 1):
-        t0, c0 = SKY_STOPS[i]
-        t1, c1 = SKY_STOPS[i + 1]
+for y in range(H):
+    t = y / (H - 1)
+    for k in range(len(SKY_STOPS) - 1):
+        t0, c0 = SKY_STOPS[k]
+        t1, c1 = SKY_STOPS[k + 1]
         if t0 <= t <= t1:
-            return lerp3(c0, c1, (t - t0) / max(1e-9, t1 - t0))
-    return SKY_STOPS[-1][1]
+            row_fill(y, lerp3(c0, c1, (t - t0) / (t1 - t0)))
+            break
 
-
-for y in range(HORIZON + 1):
-    c = sky_at(y)
-    for x in range(W):
-        px(x, y, *c)
-
-# faint stars high up (fixed positions, deterministic)
-STARS = [(80, 60), (170, 120), (260, 45), (350, 95), (470, 55), (560, 110),
-         (640, 40), (900, 90), (950, 170), (120, 210), (700, 150), (40, 140),
-         (830, 220), (420, 170), (980, 260), (210, 260), (540, 200)]
-for sx, sy in STARS:
-    disc(sx, sy, 2, 255, 240, 210, 0.85)
+# Stars in the upper sky.
+for _ in range(140):
+    x = rng.randint(0, W - 1)
+    y = rng.randint(0, 300)
+    r = rng.choice([1, 1, 1, 2])
+    a = rng.uniform(0.25, 0.9)
+    circle(x, y, r, (255, 240, 210), a)
 
 # ---------------------------------------------------------------- sun
-SUN_C, SUN_R = (778, 618), 82
-# glow: concentric translucent discs
-for k in range(6, 0, -1):
-    disc(SUN_C[0], SUN_C[1], SUN_R + k * 26, 255, 170, 70, 0.10)
-disc(SUN_C[0], SUN_C[1], SUN_R + 10, 255, 196, 110, 0.9)
-disc(SUN_C[0], SUN_C[1], SUN_R, 255, 214, 96)
-disc(SUN_C[0], SUN_C[1], SUN_R - 22, 255, 232, 150)
-# low dark hills on the horizon, left side only (sun stays clear)
-for x in range(0, 560):
-    hill = 806 - int(26 * math.sin(x / 190.0) ** 2) - int(10 * math.sin(x / 47.0 + 1.3))
-    for y in range(hill, HORIZON + 1):
-        blend(x, y, 52, 30, 66, 0.85)
+SUN = (572, 428)
+SUN_R = 148
+# Warm glow, radial falloff.
+for dy in range(-360, 361):
+    for dx in range(-360, 361):
+        d = math.sqrt(dx * dx + dy * dy)
+        if d < 360:
+            a = max(0.0, (1 - d / 360.0)) ** 2 * 0.55
+            blend(SUN[0] + dx, SUN[1] + dy, (255, 150, 70), a)
+circle(SUN[0], SUN[1], SUN_R, (255, 214, 122))
+circle(SUN[0], SUN[1], SUN_R - 22, (255, 232, 160))
+# Sun disc shading: slightly darker rim.
+for dy in range(-SUN_R, SUN_R + 1):
+    dx = int(math.sqrt(SUN_R * SUN_R - dy * dy))
+    span(SUN[1] + dy, SUN[0] - dx, SUN[0] + dx, (255, 214, 122))
 
-# ---------------------------------------------------------------- table
-for y in range(HORIZON, H):
-    t = (y - HORIZON) / (H - HORIZON)
-    c = lerp3((96, 60, 36), (58, 34, 20), t)
-    for x in range(W):
-        px(x, y, *c)
-# plank seams + grain
-for gy in (856, 902, 948, 994):
-    for x in range(W):
-        px(x, gy, 44, 26, 15)
-        px(x, gy + 1, 120, 76, 46)
-for gx, gy0, glen in [(140, 880, 60), (620, 930, 90), (820, 870, 70),
-                      (300, 970, 80), (60, 930, 50), (920, 990, 60)]:
-    for i in range(glen):
-        px(gx + i, gy0 + int(3 * math.sin(i / 18.0)), 70, 42, 24)
-# warm light pool on the table under the sun
-for y in range(HORIZON, H):
-    for x in range(560, W):
-        d = math.hypot(x - 778, y - 900) / 420.0
-        if d < 1.0:
-            blend(x, y, 255, 170, 80, 0.16 * (1 - d))
-
-# ---------------------------------------------------------------- koi spine
-# S-curve from the teacup (tail, bottom-left) up to the head (top-right,
-# reaching for the sun). Control points give a real S, not a straight arc.
-CTRL = [(318, 782), (352, 690), (430, 600), (540, 540),
-        (640, 480), (724, 420), (792, 372)]
-SEG = 240  # samples along the spine
-
-
-def spine(t):
-    """Catmull-Rom through CTRL, t in 0..1. Returns (x, y)."""
-    n = len(CTRL) - 1
-    f = t * n
-    i = min(n - 1, int(f))
-    u = f - i
-    p0 = CTRL[max(0, i - 1)]
-    p1 = CTRL[i]
-    p2 = CTRL[i + 1]
-    p3 = CTRL[min(n, i + 2)]
-    x = 0.5 * ((2 * p1[0]) + (-p0[0] + p2[0]) * u
-               + (2 * p0[0] - 5 * p1[0] + 4 * p2[0] - p3[0]) * u * u
-               + (-p0[0] + 3 * p1[0] - 3 * p2[0] + p3[0]) * u * u * u)
-    y = 0.5 * ((2 * p1[1]) + (-p0[1] + p2[1]) * u
-               + (2 * p0[1] - 5 * p1[1] + 4 * p2[1] - p3[1]) * u * u
-               + (-p0[1] + 3 * p1[1] - 3 * p2[1] + p3[1]) * u * u * u)
-    return x, y
-
-
-def radius(t):
-    """Body half-width: thin tail, fat belly, tapered head."""
-    if t < 0.12:
-        return lerp(16, 34, t / 0.12)
-    if t < 0.45:
-        return lerp(34, 64, (t - 0.12) / 0.33)
-    if t < 0.8:
-        return lerp(64, 46, (t - 0.45) / 0.35)
-    return lerp(46, 30, (t - 0.8) / 0.2)
-
-
-SPINE = [spine(i / SEG) for i in range(SEG + 1)]
-
-# dark outline first (slightly wider), then white body
-for (x, y), t in zip(SPINE, [i / SEG for i in range(SEG + 1)]):
-    disc(int(x), int(y), int(radius(t)) + 4, 176, 52, 28)
-for (x, y), t in zip(SPINE, [i / SEG for i in range(SEG + 1)]):
-    disc(int(x), int(y), int(radius(t)), 250, 247, 238)
-
-# bold orange-red patches, kept inside the body (smaller than local radius),
-# stretched along the spine so they read as koi markings, not polka dots
-PATCHES = [
-    (0.30, 0.0, 46, 26), (0.52, -4, 48, 26), (0.70, 0.0, 44, 26),
-    (0.88, 4, 30, 20), (0.16, 0, 24, 16),
+# ---------------------------------------------------------------- clouds
+# Dark silhouetted clouds with warm-lit undersides.
+# Dark silhouetted clouds with warm-lit undersides, drawn as clusters of
+# overlapping puffs so they read as clouds, not bars.
+CLOUDS = [
+    (180, 150, (38, 18, 58)),
+    (830, 120, (38, 18, 58)),
+    (760, 300, (46, 20, 62)),
+    (120, 330, (52, 24, 66)),
 ]
-for t, off, prx, pry in PATCHES:
-    x, y = spine(t)
-    x2, y2 = spine(min(1.0, t + 0.02))
-    dx, dy = x2 - x, y2 - y
-    L = math.hypot(dx, dy) or 1.0
-    nx, ny = -dy / L, dx / L
-    ang = math.degrees(math.atan2(dy, dx))
-    rot_ellipse(int(x + nx * off), int(y + ny * off), prx, pry, ang,
-                232, 84, 34)
-# a few small orange speckles
-for t, off, pr in [(0.44, -20, 12), (0.62, 18, 11), (0.80, -16, 10),
-                   (0.24, 10, 10), (0.95, 0, 12)]:
-    x, y = spine(t)
-    x2, y2 = spine(min(1.0, t + 0.02))
-    dx, dy = x2 - x, y2 - y
-    L = math.hypot(dx, dy) or 1.0
-    disc(int(x - dy / L * off), int(y + dx / L * off), pr, 232, 84, 34)
+for cx, cy, col in CLOUDS:
+    for ox, oy, rx, ry in [(-70, 6, 70, 16), (0, -4, 95, 22), (75, 6, 65, 15)]:
+        ellipse(cx + ox, cy + oy, rx, ry, col, 0.9)
+    ellipse(cx, cy + 12, 110, 8, (255, 120, 70), 0.16)
+
+# ---------------------------------------------------------------- whale
+# Spine: quadratic bezier from tail base (in the water) to head tip.
+P0 = (648, 700)
+P1 = (742, 400)
+P2 = (408, 178)
+
+# Radius profile along the spine (t -> radius).
+R_PROFILE = [(0.00, 52), (0.15, 96), (0.35, 112), (0.55, 104),
+             (0.75, 78), (0.90, 46), (1.00, 20)]
 
 
-def spine_frame(t):
-    """Spine point + unit tangent + unit normal (pointing up-left)."""
-    x, y = spine(t)
-    x2, y2 = spine(min(1.0, t + 0.01))
-    dx, dy = x2 - x, y2 - y
-    L = math.hypot(dx, dy) or 1.0
-    tx_, ty_ = dx / L, dy / L
-    nx, ny = -ty_, tx_
-    if ny > 0:  # keep the normal pointing upward
-        nx, ny = -nx, -ny
-    return x, y, tx_, ty_, nx, ny
+def radius_at(t):
+    for k in range(len(R_PROFILE) - 1):
+        t0, r0 = R_PROFILE[k]
+        t1, r1 = R_PROFILE[k + 1]
+        if t0 <= t <= t1:
+            return lerp(r0, r1, (t - t0) / (t1 - t0))
+    return R_PROFILE[-1][1]
 
 
-# dorsal fin: a soft swept fin hugging the upper edge of the belly
-_d1 = spine_frame(0.40)
-_d2 = spine_frame(0.58)
-_b1 = (_d1[0] + _d1[4] * (radius(0.40) - 4), _d1[1] + _d1[5] * (radius(0.40) - 4))
-_b2 = (_d2[0] + _d2[4] * (radius(0.58) - 4), _d2[1] + _d2[5] * (radius(0.58) - 4))
-_mid = spine_frame(0.49)
-_tip = (_mid[0] + _mid[4] * (radius(0.49) + 52),
-        _mid[1] + _mid[5] * (radius(0.49) + 52))
-_tip2 = (_mid[0] + _mid[4] * (radius(0.49) + 34)
-         + _mid[2] * 34,
-         _mid[1] + _mid[5] * (radius(0.49) + 34) + _mid[3] * 34)
-poly([(int(_b1[0]), int(_b1[1])), (int(_tip[0]), int(_tip[1])),
-      (int(_tip2[0]), int(_tip2[1])), (int(_b2[0]), int(_b2[1]))],
-     238, 120, 60, 0.95)
-poly([(int(_b1[0]), int(_b1[1])),
-      (int(lerp(_b1[0], _tip[0], 0.55)), int(lerp(_b1[1], _tip[1], 0.55))),
-      (int(_b2[0]), int(_b2[1]))], 250, 247, 238, 0.75)
+BODY = (30, 48, 92)
+BODY_DARK = (20, 34, 68)
+BELLY = (150, 184, 216)
 
-# pectoral fin under the head, swept back
-hx, hy = spine(0.94)
-poly([(int(hx) - 6, int(hy) + 26), (int(hx) - 66, int(hy) + 96),
-      (int(hx) - 18, int(hy) + 78)], 244, 150, 92, 0.95)
-poly([(int(hx) - 10, int(hy) + 30), (int(hx) - 52, int(hy) + 84),
-      (int(hx) - 20, int(hy) + 70)], 250, 247, 238, 0.8)
+# Tail flukes first (behind the body), swept back, half in the water.
+poly([(648, 690), (806, 800), (716, 812), (664, 742)], BODY_DARK)
+poly([(648, 690), (498, 822), (596, 830), (636, 744)], BODY_DARK)
 
-# forked tail: two long flowing lobes streaming back from the tail base
-tx, ty = spine(0.0)
-rot_ellipse(int(tx) - 33, int(ty) - 37, 65, 17, -38, 240, 110, 52, 0.95)
-rot_ellipse(int(tx) - 33, int(ty) - 37, 42, 7, -38, 250, 247, 238, 0.8)
-rot_ellipse(int(tx) - 28, int(ty) + 28, 60, 16, 42, 232, 84, 34, 0.95)
-rot_ellipse(int(tx) - 28, int(ty) + 28, 38, 6, 42, 250, 247, 238, 0.8)
+# Body: overlapping circles along the spine, tail -> head.
+spine = []
+N = 220
+for k in range(N + 1):
+    t = k / N
+    spine.append((bez(P0, P1, P2, t), radius_at(t)))
+for (x, y), r in spine:
+    circle(int(x), int(y), int(r), BODY)
 
-# head: eye + gill line + mouth
-ex, ey = int(hx) + 16, int(hy) - 12
-disc(ex, ey, 10, 30, 22, 18)
-disc(ex + 3, ey - 3, 3, 255, 255, 255)
-# gill curve
-for a in range(0, 121, 6):
-    ang = math.radians(a - 60)
-    gx = int(hx) - 6 + int(20 * math.cos(ang))
-    gy = int(hy) + 4 + int(26 * math.sin(ang))
-    disc(gx, gy, 2, 200, 90, 50, 0.8)
-line(int(hx) + 26, int(hy) + 16, int(hx) + 40, int(hy) + 20, 176, 52, 28, 3)
+# Dark dorsal shading on the upper side of the body.
+for k in range(N + 1):
+    t = k / N
+    if 0.15 <= t <= 0.95:
+        (x, y), r = spine[k]
+        # Offset toward the upper-right (sun side is behind; shade the top).
+        circle(int(x + r * 0.12), int(y - r * 0.28), int(r * 0.72), BODY_DARK, 0.22)
 
-# ---------------------------------------------------------------- splash
-# water bursting out of the cup where the koi launched
-SPLASH = [(398, 742, 26), (360, 752, 18), (438, 750, 20), (330, 766, 14),
-          (470, 764, 15), (392, 716, 14), (420, 726, 11), (352, 726, 11)]
-for sx, sy, sr in SPLASH:
-    disc(sx, sy, sr, 214, 232, 244, 0.95)
-    disc(sx - sr // 3, sy - sr // 3, max(2, sr // 3), 255, 255, 255, 0.9)
-# droplets trailing the leap (fixed positions along the arc)
-DROPS = [(330, 660, 9), (300, 700, 7), (392, 590, 8), (470, 520, 6),
-         (560, 460, 8), (650, 410, 6), (700, 350, 7), (470, 640, 5),
-         (540, 580, 5), (610, 500, 5), (360, 620, 6), (760, 430, 5)]
-for dx_, dy_, dr in DROPS:
-    disc(dx_, dy_, dr, 190, 214, 236, 0.95)
-    disc(dx_ - 2, dy_ - 2, max(1, dr // 3), 255, 255, 255, 0.95)
-# splash arcs over the cup rim
-for a in range(200, 341, 8):
-    ang = math.radians(a)
-    ax = int(398 + 58 * math.cos(ang))
-    ay = int(756 + 26 * math.sin(ang))
-    disc(ax, ay, 4, 226, 238, 246, 0.9)
+# Pale belly stripe along the lower-left side.
+for k in range(N + 1):
+    t = k / N
+    if 0.20 <= t <= 0.96:
+        (x, y), r = spine[k]
+        circle(int(x - r * 0.26), int(y + r * 0.30), int(r * 0.42), BELLY, 0.38)
 
-# ---------------------------------------------------------------- teacup
-# saucer
-ellipse(398, 838, 108, 20, 210, 208, 200)
-ellipse(398, 834, 100, 17, 244, 242, 236)
-# cup body: trapezoid, white porcelain
-poly([(330, 762), (466, 762), (448, 836), (348, 836)], 238, 236, 230)
-poly([(336, 768), (460, 768), (446, 830), (350, 830)], 250, 249, 243)
-# blue pattern band + dots
-for x in range(338, 460, 4):
-    ytop = 786
-    px(x, ytop, 52, 96, 158)
-    px(x, ytop + 1, 52, 96, 158)
-for bx in (362, 398, 434):
-    disc(bx, 806, 5, 52, 96, 158)
-# rim
-ellipse(398, 762, 68, 12, 250, 249, 243)
-ellipse(398, 762, 68, 12, 200, 198, 190, 0.0)  # no-op keeps shape explicit
-for x in range(330, 467):
-    dx = (x - 398) / 68.0
-    if abs(dx) <= 1.0:
-        y = 762 - int(12 * math.sqrt(1 - dx * dx))
-        px(x, y, 190, 188, 182)
-# tea surface inside the rim
-ellipse(398, 762, 58, 9, 196, 120, 52)
-ellipse(398, 761, 50, 7, 214, 138, 66)
-# handle: arc on the right side
-for a in range(-80, 101, 4):
-    ang = math.radians(a)
-    hx2 = int(462 + 22 * math.cos(ang))
-    hy2 = int(800 + 30 * math.sin(ang))
-    disc(hx2, hy2, 5, 244, 242, 236)
-# foot shadow under the saucer
-ellipse(398, 852, 104, 10, 40, 24, 14, 0.55)
+# Pectoral fin, a slim tapered blade sweeping down from mid-body.
+poly([(592, 492), (478, 616), (548, 630)], BODY_DARK)
 
-# ---------------------------------------------------------------- petals
-PETALS = [(150, 300, -30), (230, 180, 25), (620, 240, -50), (880, 300, 40),
-          (120, 520, 15), (920, 520, -25), (560, 180, 60), (300, 420, -15),
-          (840, 160, 20), (700, 640, -40), (180, 640, 35), (950, 420, -60)]
-for px_, py_, ang in PETALS:
-    rot_ellipse(px_, py_, 15, 8, ang, 250, 158, 182)
-    rot_ellipse(px_, py_, 11, 5, ang, 255, 190, 205)
+# Head details: eye and a hint of a jaw line near the tip.
+head = bez(P0, P1, P2, 0.97)
+# Tangent at head, pointing outward.
+hx, hy = head
+eye = (int(hx - 26), int(hy + 6))
+circle(eye[0], eye[1], 9, (8, 12, 24))
+circle(eye[0] + 3, eye[1] - 3, 3, (255, 255, 255))
+thick_line(int(hx + 8), int(hy + 26), int(hx - 52), int(hy + 52), 5, BODY_DARK, 0.7)
 
-# ---------------------------------------------------------------- PNG encode
+# Water streaming off the body: pale streaks along the lower edge.
+for k in range(26):
+    t = rng.uniform(0.25, 0.85)
+    (x, y), r = spine[int(t * N)]
+    ang = rng.uniform(0.35, 1.1)
+    ln = rng.uniform(26, 70)
+    x2 = x - r * 0.55 + math.cos(ang) * ln * 0.4
+    y2 = y + r * 0.55 + math.sin(ang) * ln
+    thick_line(int(x - r * 0.5), int(y + r * 0.5),
+              int(x2), int(y2), rng.uniform(2, 4),
+              (200, 225, 245), rng.uniform(0.35, 0.7))
+
+# ---------------------------------------------------------------- sea
+SEA_TOP = 716
+for y in range(SEA_TOP, H):
+    t = (y - SEA_TOP) / (H - SEA_TOP)
+    row_fill(y, lerp3((10, 46, 82), (4, 16, 38), t))
+
+# Wavy sea surface line.
+for x in range(W):
+    y = SEA_TOP + int(6 * math.sin(x * 0.018) + 3 * math.sin(x * 0.043 + 1.7))
+    circle(x, y, 2, (120, 170, 205), 0.5)
+
+# Swell bands: long sine strokes catching the sunset.
+for band, yy, amp, col, a in [
+        (0, 780, 10, (255, 140, 80), 0.30),
+        (1, 850, 14, (255, 110, 70), 0.22),
+        (2, 930, 18, (120, 170, 205), 0.25)]:
+    for x in range(0, W, 2):
+        y = yy + int(amp * math.sin(x * 0.011 + band * 2.1))
+        circle(x, y, 2, col, a)
+
+# Foam ring where the whale bursts through the surface.
+foam_cx, foam_cy = 655, 726
+for _ in range(260):
+    ang = rng.uniform(0, 2 * math.pi)
+    rr = rng.uniform(0.55, 1.0)
+    fx = int(foam_cx + math.cos(ang) * 175 * rr)
+    fy = int(foam_cy + math.sin(ang) * 30 * rr)
+    circle(fx, fy, rng.randint(2, 7), (235, 245, 250),
+           rng.uniform(0.5, 0.95))
+ellipse(foam_cx, foam_cy, 175, 26, (235, 245, 250), 0.35)
+
+# ---------------------------------------------------------------- spray
+# Frozen droplets bursting around the whale's head and flanks.
+for _ in range(220):
+    t = rng.uniform(0.30, 1.0)
+    (x, y), r = spine[int(t * N)]
+    side = rng.choice([-1, 1])
+    d = r * rng.uniform(1.02, 1.5)
+    ang = rng.uniform(-0.6, 1.2) if side > 0 else rng.uniform(1.9, 3.8)
+    sx = int(x + math.cos(ang) * d)
+    sy = int(y + math.sin(ang) * d - rng.uniform(0, 26))
+    circle(sx, sy, rng.randint(1, 4), (240, 248, 252),
+           rng.uniform(0.45, 0.95))
+# A few bright spray arcs arcing off the head.
+for _ in range(4):
+    t = rng.uniform(0.75, 1.0)
+    (x, y), r = spine[int(t * N)]
+    a0 = rng.uniform(2.6, 3.6)
+    for k in range(10):
+        a = a0 + k * 0.09
+        rr = r * (1.15 + k * 0.09)
+        circle(int(x + math.cos(a) * rr), int(y + math.sin(a) * rr - k * 3),
+               3, (245, 250, 255), 0.8)
+
+# ---------------------------------------------------------------- sailboat (scale)
+boat_x, boat_y = 232, 836
+poly([(boat_x - 34, boat_y), (boat_x + 34, boat_y),
+      (boat_x + 22, boat_y + 14), (boat_x - 22, boat_y + 14)], (16, 20, 34))
+thick_line(boat_x, boat_y, boat_x, boat_y - 52, 3, (16, 20, 34))
+poly([(boat_x + 2, boat_y - 50), (boat_x + 2, boat_y - 4),
+      (boat_x + 34, boat_y - 4)], (245, 240, 225))
+poly([(boat_x - 2, boat_y - 42), (boat_x - 2, boat_y - 4),
+      (boat_x - 26, boat_y - 4)], (225, 225, 210))
+# Reflection.
+for k in range(5):
+    span(boat_y + 18 + k * 4, boat_x - 26 + k * 3, boat_x + 26 - k * 3,
+         (255, 160, 90), 0.25 - k * 0.04)
+
+# ---------------------------------------------------------------- birds
+for bx, by, s in [(300, 168, 12), (352, 142, 9), (706, 210, 11),
+                  (760, 246, 8), (250, 210, 9)]:
+    thick_line(bx - s, by, bx, by - 5, 2, (20, 16, 34))
+    thick_line(bx, by - 5, bx + s, by, 2, (20, 16, 34))
+
+# ---------------------------------------------------------------- foreground wave
+fg = [(0, 1024)]
+for x in range(0, W + 1, 16):
+    fg.append((x, 972 + int(14 * math.sin(x * 0.012 + 0.8))))
+fg.append((1024, 1024))
+poly(fg, (3, 12, 28))
+for x in range(0, W, 6):
+    y = 972 + int(14 * math.sin(x * 0.012 + 0.8))
+    circle(x, y, 2, (140, 190, 220), 0.35)
+
+# ---------------------------------------------------------------- PNG write
 def chunk(typ, data):
     c = struct.pack(">I", len(data)) + typ + data
-    c += struct.pack(">I", zlib.crc32(typ + data) & 0xFFFFFFFF)
-    return c
+    return c + struct.pack(">I", zlib.crc32(typ + data) & 0xFFFFFFFF)
 
 
-def write_png(path):
-    raw = b"".join(b"\x00" + bytes(buf[y * W * 3:(y + 1) * W * 3])
-                   for y in range(H))
-    ihdr = struct.pack(">IIBBBBB", W, H, 8, 2, 0, 0, 0)
-    png = (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr)
-           + chunk(b"IDAT", zlib.compress(raw, 9))
-           + chunk(b"IEND", b""))
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "wb") as f:
-        f.write(png)
-    return len(png)
+raw = b"".join(b"\x00" + bytes(buf[y * W * 3:(y + 1) * W * 3])
+               for y in range(H))
+png = (b"\x89PNG\r\n\x1a\n"
+       + chunk(b"IHDR", struct.pack(">IIBBBBB", W, H, 8, 2, 0, 0, 0))
+       + chunk(b"IDAT", zlib.compress(raw, 9))
+       + chunk(b"IEND", b""))
 
-
-def main():
-    outdir = os.environ.get("MAKEFUN_OUTPUT_DIR") or "output"
-    path = os.path.join(outdir, "entry.png")
-    size = write_png(path)
-    print(f"wrote {path} ({W}x{H}, {size} bytes)")
-
-
-if __name__ == "__main__":
-    main()
+out_dir = os.environ.get("MAKEFUN_OUTPUT_DIR", "/output")
+os.makedirs(out_dir, exist_ok=True)
+path = os.path.join(out_dir, "entry.png")
+with open(path, "wb") as f:
+    f.write(png)
+print("wrote", path, len(png), "bytes")
